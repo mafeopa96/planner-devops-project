@@ -1,0 +1,115 @@
+trigger:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  dockerRegistry: 'TU_AZURE_CONTAINER_REGISTRY.azurecr.io'
+  imageName: 'mi-app'
+  imageTag: '$(Build.BuildNumber)'
+  azureSubscription: 'TU_SERVICE_CONNECTION'
+  webAppName: 'mi-app-web'
+  resourceGroup: 'mi-rg'
+
+stages:
+
+  # ─── STAGE 1: BUILD & TEST ─────────────────────────────────
+  - stage: Build
+    displayName: 'Build y Test'
+    jobs:
+      - job: BuildJob
+        steps:
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: '20.x'
+            displayName: 'Instalar Node.js 20'
+
+          - script: |
+              cd app
+              npm install
+              npm test
+            displayName: 'Instalar dependencias y ejecutar tests'
+
+          - task: Docker@2
+            displayName: 'Build imagen Docker'
+            inputs:
+              command: build
+              dockerfile: 'app/Dockerfile'
+              buildContext: 'app/'
+              repository: '$(dockerRegistry)/$(imageName)'
+              tags: |
+                $(imageTag)
+                latest
+
+          - task: Docker@2
+            displayName: 'Push imagen a Azure Container Registry'
+            inputs:
+              command: push
+              containerRegistry: '$(dockerRegistry)'
+              repository: '$(imageName)'
+              tags: |
+                $(imageTag)
+                latest
+
+          - task: PublishPipelineArtifact@1
+            inputs:
+              targetPath: '$(Pipeline.Workspace)'
+              artifact: 'drop'
+            displayName: 'Publicar artefactos'
+
+  # ─── STAGE 2: DEPLOY A STAGING ─────────────────────────────
+  - stage: DeployStaging
+    displayName: 'Deploy a Staging'
+    dependsOn: Build
+    condition: succeeded()
+    jobs:
+      - deployment: DeployStaging
+        environment: 'staging'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebAppContainer@1
+                  displayName: 'Deploy a Azure Web App (Staging)'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    appName: '$(webAppName)'
+                    slotName: 'staging'
+                    containers: '$(dockerRegistry)/$(imageName):$(imageTag)'
+
+  # ─── STAGE 3: APROBACIÓN MANUAL ────────────────────────────
+  - stage: ApprovalGate
+    displayName: 'Aprobación para Producción'
+    dependsOn: DeployStaging
+    jobs:
+      - job: WaitForApproval
+        pool: server
+        steps:
+          - task: ManualValidation@0
+            timeoutInMinutes: 60
+            inputs:
+              instructions: 'Revisar staging y aprobar deploy a producción'
+              onTimeout: 'reject'
+
+  # ─── STAGE 4: DEPLOY A PRODUCCIÓN ──────────────────────────
+  - stage: DeployProduction
+    displayName: 'Deploy a Producción'
+    dependsOn: ApprovalGate
+    condition: succeeded()
+    jobs:
+      - deployment: DeployProduction
+        environment: 'production'
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - task: AzureWebAppContainer@1
+                  displayName: 'Deploy a Azure Web App (Producción)'
+                  inputs:
+                    azureSubscription: '$(azureSubscription)'
+                    appName: '$(webAppName)'
+                    containers: '$(dockerRegistry)/$(imageName):$(imageTag)'

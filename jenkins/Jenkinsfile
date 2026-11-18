@@ -1,0 +1,101 @@
+pipeline {
+    agent any
+
+    environment {
+        DOCKER_IMAGE    = "mi-app"
+        DOCKER_REGISTRY = "docker.io/TU_USUARIO"
+        CONTAINER_PORT  = "8080"
+        APP_DIR         = "app"
+    }
+
+    stages {
+
+        stage('Checkout') {
+            steps {
+                echo "Clonando repositorio..."
+                checkout scm
+            }
+        }
+
+        stage('Instalar dependencias') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh 'npm install'
+                }
+            }
+        }
+
+        stage('Tests') {
+            steps {
+                dir("${APP_DIR}") {
+                    sh 'npm test'
+                }
+            }
+        }
+
+        stage('Build imagen Docker') {
+            steps {
+                script {
+                    def imageTag = "${DOCKER_REGISTRY}/${DOCKER_IMAGE}:${BUILD_NUMBER}"
+                    sh "docker build -t ${imageTag} ${APP_DIR}/"
+                    env.IMAGE_TAG = imageTag
+                }
+            }
+        }
+
+        stage('Push a Docker Registry') {
+            steps {
+                withCredentials([usernamePassword(
+                    credentialsId: 'docker-hub-credentials',
+                    usernameVariable: 'DOCKER_USER',
+                    passwordVariable: 'DOCKER_PASS'
+                )]) {
+                    sh "echo $DOCKER_PASS | docker login -u $DOCKER_USER --password-stdin"
+                    sh "docker push ${env.IMAGE_TAG}"
+                }
+            }
+        }
+
+        stage('Deploy') {
+            steps {
+                script {
+                    // Detiene el contenedor anterior si existe
+                    sh "docker stop mi-app || true"
+                    sh "docker rm mi-app || true"
+
+                    // Lanza el nuevo contenedor
+                    sh """
+                        docker run -d \
+                          --name mi-app \
+                          --restart unless-stopped \
+                          -p ${CONTAINER_PORT}:${CONTAINER_PORT} \
+                          -e BUILD_NUMBER=${BUILD_NUMBER} \
+                          ${env.IMAGE_TAG}
+                    """
+                }
+            }
+        }
+
+        stage('Verificar salud') {
+            steps {
+                sh """
+                    sleep 5
+                    curl -f http://localhost:${CONTAINER_PORT}/ || exit 1
+                    echo "Servicio saludable ✓"
+                """
+            }
+        }
+    }
+
+    post {
+        success {
+            echo "✅ Deploy exitoso — Build #${BUILD_NUMBER}"
+        }
+        failure {
+            echo "❌ Deploy fallido — Build #${BUILD_NUMBER}"
+            // Rollback: restaurar versión anterior
+            sh "docker stop mi-app || true"
+            sh "docker run -d --name mi-app -p 8080:8080 ${DOCKER_REGISTRY}/${DOCKER_IMAGE}:${BUILD_NUMBER.toInteger() - 1} || true"
+        }
+    }
+}

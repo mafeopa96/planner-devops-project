@@ -1,0 +1,38 @@
+version: 0.2
+
+# buildspec.yml — ejecutado por AWS CodeBuild
+# Variables de entorno requeridas en CodeBuild:
+#   AWS_ACCOUNT_ID, AWS_DEFAULT_REGION, IMAGE_REPO_NAME, ECS_CLUSTER, ECS_SERVICE
+
+phases:
+
+  pre_build:
+    commands:
+      - echo "Iniciando pre-build..."
+      - echo "Autenticando con ECR..."
+      - aws ecr get-login-password --region $AWS_DEFAULT_REGION |
+          docker login --username AWS
+          --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com
+      - IMAGE_URI=$AWS_ACCOUNT_ID.dkr.ecr.$AWS_DEFAULT_REGION.amazonaws.com/$IMAGE_REPO_NAME
+      - IMAGE_TAG=$CODEBUILD_RESOLVED_SOURCE_VERSION
+
+  build:
+    commands:
+      - echo "Ejecutando tests..."
+      - cd app && npm install && npm test && cd ..
+      - echo "Construyendo imagen Docker..."
+      - docker build -t $IMAGE_URI:$IMAGE_TAG app/
+      - docker tag $IMAGE_URI:$IMAGE_TAG $IMAGE_URI:latest
+
+  post_build:
+    commands:
+      - echo "Subiendo imagen a ECR..."
+      - docker push $IMAGE_URI:$IMAGE_TAG
+      - docker push $IMAGE_URI:latest
+      - echo "Generando imagedefinitions.json para ECS..."
+      - printf '[{"name":"mi-app","imageUri":"%s"}]' $IMAGE_URI:$IMAGE_TAG > imagedefinitions.json
+      - echo "Build completado exitosamente"
+
+artifacts:
+  files:
+    - imagedefinitions.json
